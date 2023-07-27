@@ -10,7 +10,7 @@ from .kernels import eval_kernel
 
 from sklearn.gaussian_process.kernels import Kernel
 from sklearn.neighbors import KNeighborsRegressor
-from scipy.linalg import cholesky, cho_solve
+from scipy.linalg import cholesky, cho_solve, solve
 
 
 class GPInterpolation(object):
@@ -156,9 +156,12 @@ class GPInterpolation(object):
         """
         HT = kernel.__call__(X2, Y=X1)
         K = kernel.__call__(X1) + np.eye(len(y))*y_err**2
-        factor = (cholesky(K, overwrite_a=True, lower=False), False)
-        alpha = cho_solve(factor, y, overwrite_b=False)
-        y_predict = np.dot(HT,alpha.reshape((len(alpha),1))).T[0] 
+        try:
+            factor = (cholesky(K, overwrite_a=True, lower=False), False)
+            alpha = cho_solve(factor, y, overwrite_b=False)
+        except np.linalg.LinAlgError: # Many kernels don't guarantee positive definite results
+            alpha = solve(K,y,assume_a = 'sym')
+        y_predict = np.dot(HT,alpha.reshape((len(alpha),1))).T[0]
         if return_cov:
             fact = cholesky(K, lower=True) # I am computing maybe twice the same things...
             v = cho_solve((fact, True), HT.T)
