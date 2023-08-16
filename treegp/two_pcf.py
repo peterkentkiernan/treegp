@@ -316,17 +316,18 @@ class two_pcf(object):
         :param seed: seed of the random generator.
         """
         np.random.seed(seed)
+        if mask is None:
+            mask = np.array([True]*len(xi))
         xi_bootstrap = []
         for i in range(n_bootstrap):
             u, v, y, y_err = self.resample_bootstrap()
             coord = np.array([u, v]).T
             xi, d, c, m = self.comp_2pcf(coord, y, y_err)
-            if mask is None:
-                mask = np.array([True]*len(xi))
+            xi[np.invert(m)] = np.NaN
             xi_bootstrap.append(xi[mask])
         xi_bootstrap = np.array(xi_bootstrap)
 
-        dxi = xi_bootstrap - np.mean(xi_bootstrap, axis=0)
+        dxi = xi_bootstrap - np.nanmean(xi_bootstrap, axis=0)
         xi_cov = 1./(len(dxi)-1.) * np.dot(dxi.T, dxi)
         return xi_cov
 
