@@ -237,7 +237,7 @@ class two_pcf(object):
         """
         npsfs = len(self.y)
 
-        ind_object = np.random.randint(0,npsfs-1, size=npsfs)
+        ind_object = np.random.randint(0,npsfs, size=npsfs)
         u_ressample = self.X[:,0][ind_object]
         v_ressample = self.X[:,1][ind_object]
         y_ressample = self.y[ind_object]
@@ -284,6 +284,7 @@ class two_pcf(object):
             nmask = int((len(mask)/2) + even_or_odd)
             mask[nmask:,:] = False
             mask[nmask-1][nmask:] = boolean_mask_odd
+            mask = np.logical_and(mask,kk.npairs > 0)
 
             mask = mask.reshape(npixels)
 
