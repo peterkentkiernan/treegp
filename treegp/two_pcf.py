@@ -341,11 +341,11 @@ class two_pcf(object):
         dxi = np.nan_to_num(dxi)
         xi_cov = np.dot(dxi.T, dxi)
         
-        xi_cov[mask_consistent,:][:,mask_consistent] /= len(dxi) - 1
-        xi_cov[mask_inconsistent,:][:,mask_consistent] /= np.sum(valid,axis=0)[:,np.newaxis] - 1
-        xi_cov[mask_consistent,:][:,mask_inconsistent] /= np.sum(valid,axis=0)[np.newaxis,:] - 1
+        xi_cov[np.ix_(mask_consistent,mask_consistent)] /= len(dxi) - 1
+        xi_cov[np.ix_(mask_inconsistent,mask_consistent)] /= np.sum(valid,axis=0)[:,np.newaxis] - 1
+        xi_cov[np.ix_(mask_consistent,mask_inconsistent)] /= np.sum(valid,axis=0)[np.newaxis,:] - 1
         valid = valid.astype(int)
-        xi_cov[mask_inconsistent,:][:,mask_inconsistent] /= np.dot(valid.T,valid) - 1
+        xi_cov[np.ix_(mask_inconsistent,mask_inconsistent)] /= np.dot(valid.T,valid) - 1
         
         return xi_cov
 
