@@ -316,19 +316,37 @@ class two_pcf(object):
         :param seed: seed of the random generator.
         """
         np.random.seed(seed)
+        np.random.seed(seed)
         if mask is None:
-            mask = np.array([True]*len(xi))
+            mask = np.ones(len(xi),bool)
+        # This will record which bins sometimes have entries and sometimes don't
+        mask_inconsistent = np.zeros_like(mask,bool)
+        
         xi_bootstrap = []
         for i in range(n_bootstrap):
             u, v, y, y_err = self.resample_bootstrap()
             coord = np.array([u, v]).T
             xi, d, c, m = self.comp_2pcf(coord, y, y_err)
-            xi[np.invert(m)] = np.NaN
+            unusual_empty_mask = np.logical_and(mask,np.invert(m))
+            mask_inconsistent = np.logical_or(mask_inconsistent,unusual_empty_mask)
+            xi[unusual_empty_mask] = np.NaN
             xi_bootstrap.append(xi[mask])
+            
+        mask_inconsistent = mask_inconsistent[mask]
+        mask_consistent = np.invert(mask_inconsistent)
         xi_bootstrap = np.array(xi_bootstrap)
 
         dxi = xi_bootstrap - np.nanmean(xi_bootstrap, axis=0)
-        xi_cov = 1./(len(dxi)-1.) * np.dot(dxi.T, dxi)
+        valid = np.invert(np.isnan(dxi[:,mask_inconsistent]))
+        dxi = np.nan_to_num(dxi)
+        xi_cov = np.dot(dxi.T, dxi)
+        
+        xi_cov[mask_consistent,:][:,mask_consistent] /= len(dxi) - 1
+        xi_cov[mask_inconsistent,:][:,mask_consistent] /= np.sum(valid,axis=0)[:,np.newaxis] - 1
+        xi_cov[mask_consistent,:][:,mask_inconsistent] /= np.sum(valid,axis=0)[np.newaxis,:] - 1
+        valid = valid.astype(int)
+        xi_cov[mask_inconsistent,:][:,mask_inconsistent] /= np.dot(valid.T,valid) - 1
+        
         return xi_cov
 
     def return_2pcf(self, seed=610639139):
