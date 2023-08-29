@@ -41,7 +41,9 @@ def get_kernel_class(A):
     """
     if A.__class__ in [treegp.kernels.AnisotropicVonKarman,
                        treegp.kernels.AnisotropicRBF,
-                       sklearn.gaussian_process.kernels.Product]:
+                       treegp.kernels.Binned2PCF,
+                       sklearn.gaussian_process.kernels.Product,
+                       treegp.kernels.FourierKernel]:
 
         if A.__class__ in [sklearn.gaussian_process.kernels.Product]:
             ok = False
@@ -50,6 +52,7 @@ def get_kernel_class(A):
                                                  treegp.kernels.AnisotropicRBF]:
                     kernel_class = A.__dict__[key].__class__
                     ok = True
+                    break
             if not ok:
                 raise ValueError('Work only with treegp.kernels.AnisotropicVonKarman and treegp.kernels.AnisotropicRBF')
         else:
@@ -60,7 +63,7 @@ def get_kernel_class(A):
 
 class robust_2dfit(object):
     """
-    Fit hyperparameters on 2D two-point correlation when the analytical profil can
+    Fit hyperparameters on 2D two-point correlation when the analytical profile can
     be discribed as a Radial Basis Function such as a Gaussian kernel or a
     von Karman kernel.
 
@@ -101,7 +104,7 @@ class robust_2dfit(object):
             L = get_correlation_length_matrix(corr_length, g1, g2)
             invLam = np.linalg.inv(L)
             kernel_used = sklearn.gaussian_process.kernels.ConstantKernel(sigma**2,constant_value_bounds = "fixed") * self.kernel_class(invLam=invLam)
-            pcf = kernel_used.__call__(self.coord,Y=np.zeros_like(self.coord))[:,0]
+            pcf = kernel_used.__call__(self.coord,Y=np.zeros((1,self.coord.shape[1])))[:,0]
             self.kernel_fit = kernel_used
             return pcf
 
@@ -116,7 +119,7 @@ class robust_2dfit(object):
         for the linear parameter (alpha).
 
         :param param: list of non-linear parameters to search.
-                      (correlation lenght, e1, and e2).
+                      (correlation length, e1, and e2).
         """
         model = self._model_skl(1., param[0],
                                 param[1], param[2])
@@ -124,10 +127,15 @@ class robust_2dfit(object):
             self.chi2_value = np.inf
         else:
             model = model[self.mask]
-            F = np.array([model, np.ones_like(model)]).T
+            #F = np.array([model, np.ones_like(model)]).T
+            F = model.reshape(len(model),1)
             FWF = np.dot(F.T, self.W).dot(F)
+            if np.linalg.det(FWF) == 0:
+                self.chi2_value = np.inf
+                return self.chi2_value
             Y = self.flat_data[self.mask].reshape((len(model), 1))
-            self.alpha = np.linalg.inv(FWF).dot(np.dot(F.T, self.W).dot(Y))
+            self.alpha = np.linalg.inv(FWF).dot(np.dot(F.T, self.W).dot(Y))[:,0]
+            self.alpha = np.array([self.alpha,np.zeros_like(self.alpha)])
             self.alpha[0] = abs(self.alpha[0])
             self.residuals = self.flat_data[self.mask] - ((self.alpha[0] * model) + self.alpha[1])
             self.chi2_value = self.residuals.dot(self.W).dot(self.residuals.reshape((len(model), 1)))
@@ -202,7 +210,7 @@ class two_pcf(object):
     :param y_err:       Error of y. (n_samples)
     :param min_sep:     Minimum bin for treecorr. (float)
     :param max_sep:     Maximum bin for treecorr. (float)
-    :param nbins:       Number of bins (if 1D correlation function) of the square root of the number
+    :param nbins:       Number of bins (if 1D correlation function) or the square root of the number
                         of bins (if 2D correlation function) used in TreeCorr to compute the
                         2-point correlation function. [default: 20]
     :param anisotropic: 2D 2-point correlation function.

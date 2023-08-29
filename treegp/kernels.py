@@ -7,6 +7,7 @@ from scipy.spatial.distance import cdist
 from sklearn.gaussian_process.kernels import StationaryKernelMixin, NormalizedKernelMixin, Kernel
 from sklearn.gaussian_process.kernels import Hyperparameter
 from sklearn.gaussian_process.kernels import _check_length_scale
+import copy
 
 
 def eval_kernel(kernel):
@@ -390,3 +391,257 @@ class AnisotropicVonKarman(StationaryKernelMixin, NormalizedKernelMixin, Kernel)
     @property
     def bounds(self):
         return self._bounds
+
+class IndexingArray:
+    """ Uses a numpy array, but allows us to specify that it's going to be used for indexing.
+        Used to make sparse arrays of a very particular form where the last dimension is very sparse
+        but the rest are not. We compress these by storing only the index of where the value is: a
+        value of k in the IndexingArray at [i,j] means that the true array at [i,j,k] is its vals[i,j]. """
+    
+    def __init__(self, indices, vals=None, mask=None, max_depth=None):
+        self.indices = indices
+        if vals is None:
+            self.vals = np.ones_like(self.indices)
+        elif vals.shape != indices.shape:
+            raise ValueError("Indices and values must match!")
+        else:
+            self.vals = vals
+        if mask is None:
+            self.mask = np.ones_like(indices,bool)
+        elif mask.shape != indices.shape:
+            raise ValueError("Mask and indices must match!")
+        else:
+            self.mask = mask
+        if max_depth is None:
+            self.max_depth = np.max(self.indices[self.mask])
+        else:
+            self.max_depth = max_depth
+    
+    def to_ndarray(self):
+        output = np.zeros((self.shape))
+        output[*np.meshgrid(*(range(self.indices.shape[i]) for i in range(self.indices.ndim))),self.indices[self.mask]] = self.vals[mask]
+        return output
+        
+    def sum_last_axis(self):
+        output = np.zeros((self.max_depth,))
+        for i in range(self.max_depth):
+            mask = np.logical_and(self.indices == i,self.mask)
+            output[i] = np.sum(self.vals[mask])
+    
+    def multiply(self,other:np.ndarray,should_copy=False):
+        if other.ndim != self.ndim:
+            raise ValueError("Multiplication array must be broadcastable to full array!")
+        if not np.all((self.shape[i] == other.shape[i] or other.shape[i] == 1 or self.shape[i] == 1 for i in range(self.ndim))):
+            print(self.shape,other.shape)
+            raise ValueError("Multiplication array must be broadcastable to full array!")
+        if should_copy:
+            output = copy.deepcopy(self)
+        else:
+            output = self
+        if other.shape[-1] == 1:
+            output.vals = output.vals * other[...,0]
+        elif np.all(other.shape != 1):
+            output.vals = output.vals.astype(other.dtype)
+            for i in range(output.max_depth):
+                mask = np.logical_and(self.indices == i,self.mask)
+                output.vals[mask] *= other[...,i][mask]
+        else:
+            for i in range(output.max_depth):
+                mask = np.logical_and(self.indices == i,self.mask)
+                output.vals[mask] *= other[...,i][mask]
+        return output
+        
+    def transpose(self,*axes):
+        if axes[-1] not in (-1,self.ndim - 1):
+            raise RuntimeError("Transposing with compressed axis currently not supported.")
+        else:
+            self.vals.transpose(*axes[:-1])
+            self.indices.transpose(*axes[:-1])
+            self.mask.transpose(*axes[:-1])
+            
+    def __getitem__(self,key):
+        if not self.mask[key[:-1]]:
+            return 0
+        elif self.indices[key[:-1]] == key[-1]:
+            return self.vals[key[:-1]]
+        else:
+            return 0
+            
+    def __setitem__(self,key,newval):
+        if not self.mask[key[:-1]]:
+            self.mask[key[:-1]] = True
+            self.indices[key[:-1]] = key[-1]
+            self.vals[key[:-1]] = newval
+        elif self.indices[key[:-1]] == key[-1]:
+            self.vals[key[:-1]] = newval
+        else:
+            raise KeyError("Cannot stack layers in the compressed axis, must use to_ndarray first or do an appropriate transpose.")
+        
+    @property
+    def shape(self):
+        return (*self.indices.shape,self.max_depth)
+        
+    @property
+    def ndim(self):
+        return self.indices.ndim + 1
+
+class Binned2PCF(StationaryKernelMixin, NormalizedKernelMixin, Kernel):
+    """ Stores a generic (binned) two point correlation function as a kernel.
+    :param  max_sep:  Farthest away distance to be considered. Past this, all correlation is treated
+                      as 0.
+    :param  n_bins:  Number of bins to be considered if isotropic, or square root of number of bins
+                     if anisotropic,
+    :param  anisotropic:  False if only distance matters, True if direction does too. Default: True
+    :param  two_pcf:  Two-point correlation function. Defaults to all 0s.
+    """
+    def __init__(self, max_sep=None, n_bins=None, bins=None, anisotropic=True, two_pcf = None): # , fov_bounds
+        
+        if max_sep is None and bins is None:
+            raise RuntimeError("Must somehow specify maximum separation.")
+        if n_bins is None and bins is None and two_pcf is None:
+            n_bins = 50
+        if bins is None:
+            if anisotropic:
+                self.bins = np.linspace(-1*max_sep,max_sep,n_bins+1)
+            else:
+                self.bins = np.linspace(0,max_sep,n_bins+1)
+        else:
+            self.bins = bins
+        self.anisotropic = anisotropic
+        if two_pcf is None:
+            if anisotropic:
+                self.two_pcf = np.zeros((n_bins,n_bins))
+            else:
+                self.two_pcf = np.zeros((n_bins))
+        else:
+            if anisotropic:
+                assert two_pcf.shape[0] == two_pcf.shape[1]
+            self.two_pcf = two_pcf
+            
+        self.total_bins = np.prod(self.two_pcf.shape)
+
+    def __call__(self, X, Y=None, eval_gradient=False):
+        from scipy.spatial.distance import pdist, cdist, squareform
+        X = np.atleast_2d(X)
+        
+        if not self.anisotropic:
+            if Y is None:
+                dists = pdist(X)
+            else:
+                dists = cdist(X, Y)
+            dists = squareform(dists)
+            indices = np.searchsorted(self.bins,dists)
+            in_range_mask = indices < self.two_pcf.shape[0]
+            K = np.zeros_like(indices)
+            K[in_range_mask] = self.two_pcf[indices[in_range_mask].flatten()]
+            if eval_gradient:
+#                grad = np.zeros((*K.shape,self.total_bins))
+#                # Set all grad[i,j,indices[i,j]] to 1
+#                xs,ys = np.meshgrid(range(K.shape[0]),range(K.shape[1]))
+#                xs = xs[in_range_mask].flatten
+#                ys = ys[in_range_mask].flatten
+#                # numpy indexing is (y,x)
+#                grad[ys,xs,indices[in_range_mask].flatten()] = 1
+                return K, IndexingArray(indices,mask=in_range_mask,max_depth=self.total_bins)
+            else:
+                return K
+        else:
+            if Y is None:
+                dists = np.dstack((np.subtract.outer(X[:,0],X[:,0]),np.subtract.outer(X[:,1],X[:,1])))
+            else:
+                dists = np.dstack((np.subtract.outer(X[:,0],Y[:,0]),np.subtract.outer(X[:,1],Y[:,1])))
+            indices = np.searchsorted(self.bins,dists)
+            in_range_mask = np.logical_and(np.logical_and(indices[:,:,0] > 0, indices[:,:,1] > 0), np.logical_and(indices[:,:,0] < self.two_pcf.shape[0], indices[:,:,1] < self.two_pcf.shape[1]))
+            K = np.zeros((indices.shape[0],indices.shape[1]))
+            # numpy indexing is (y,x)
+            K[in_range_mask] = self.two_pcf[indices[:,:,1][in_range_mask],indices[:,:,0][in_range_mask]]
+            if eval_gradient:
+#                grad = np.zeros((*K.shape,self.total_bins))
+                # Get the indices that these correspond with in the flattened xi
+                flattened_indices = indices @ np.array([self.two_pcf.shape[1],1])
+#                # Set all grad[i,j,indices[i,j]] to 1
+#                xs,ys = np.meshgrid(range(K.shape[0]),range(K.shape[1]))
+#                # numpy indexing is (y,x)
+#                grad[ys[in_range_mask],xs[in_range_mask],flattened_indices[in_range_mask]] = 1
+                return K, IndexingArray(flattened_indices,mask=in_range_mask,max_depth = self.total_bins)
+            else:
+                return K
+    
+    def get_params(self, deep=True):
+        return {"two_pcf":self.two_pcf}
+
+    @property
+    def theta(self):
+        return self.two_pcf.flatten()
+
+    @theta.setter
+    def theta(self, theta):
+        self.two_pcf = theta.reshape(self.two_pcf.shape)
+
+    def __repr__(self):
+        return "{0}(two_pcf={1!r})".format(self.__class__.__name__, self.two_pcf)
+        
+    def clone_with_theta(self, theta):
+        cloned = copy.deepcopy(self)
+        cloned.theta = theta
+        return cloned
+
+class FourierKernel(StationaryKernelMixin, NormalizedKernelMixin, Kernel):
+    """ Stores the Fourier transform of a generic two point correlation function as a kernel.
+    :param ks: Wavenumbers of measured values, shape (n,n,2).
+    :param values: The Fourier transform at ks, shape (n,n). values[i,j] should be the Fourier series
+                    coefficient for wavevector k[i,j,:].
+    :param scale_factor: A scale factor that all input distances should be multiplied by before doing
+                        the inverse Fourier transform, that was used when calculating values. Default: 1.
+    """
+    def __init__(self, ks, values = None, scale_factor = 1.):
+        
+        self.ks = ks
+        if values is None:
+            self.values = np.zeros(ks.shape[:-1])
+        elif ks.shape[:-1] != values.shape:
+            raise ValueError("Input values must correspond to a k vector.")
+        elif not np.all(values >= 0):
+            raise ValueError("Input values must be nonnegative and real in order to produce PSD kernel matrices.")
+        else:
+            self.values = values
+        self.scale_factor = scale_factor
+        self.theta_ndim = np.prod(self.values.shape)
+
+    def __call__(self, X, Y=None, eval_gradient=False, **kwargs):
+        from finufft import nufft2d3
+        X = np.atleast_2d(X)
+        if Y is None:
+            dists = np.dstack((np.subtract.outer(X[:,0],X[:,0]),np.subtract.outer(X[:,1],X[:,1])))
+        else:
+            dists = np.dstack((np.subtract.outer(X[:,0],Y[:,0]),np.subtract.outer(X[:,1],Y[:,1])))
+        dists *= self.scale_factor
+        K = nufft2d3(self.ks[...,0].flatten(),self.ks[...,1].flatten(),self.values.flatten(),dists[...,0].flatten(),dists[...,1].flatten(),**kwargs).reshape(dists.shape[:-1])
+        if eval_gradient:
+            grad = np.empty((dists.shape[:-1],self.theta_ndim))
+            for i in range(self.theta_ndim):
+                cur_indices = np.unravel_index(i,self.values.shape)
+                grad[...,i] = nufft2d3(self.ks[cur_indices+tuple([0])].flatten(),self.ks[cur_indices+tuple([1])].flatten(),self.values[cur_indices],dists[...,0].flatten(),dists[...,1].flatten(),**kwargs).reshape(dists.shape[:-1])
+                
+            return np.real(K), np.real(grad)
+        else:
+            return np.real(K)
+    
+    def get_params(self, deep=True):
+        return {"wavenumbers":self.ks,"values":self.values}
+
+    @property
+    def theta(self):
+        return self.values.flatten()
+
+    @theta.setter
+    def theta(self, theta):
+        self.values = theta.reshape(self.values.shape)
+
+    def __repr__(self):
+        return "{0}(wavenumbers={1!r},values={2!r})".format(self.__class__.__name__, self.ks, self.values)
+        
+    def clone_with_theta(self, theta):
+        cloned = copy.deepcopy(self)
+        cloned.theta = theta
+        return cloned

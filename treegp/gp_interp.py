@@ -77,8 +77,8 @@ class GPInterpolation(object):
         else:
             raise TypeError("kernel should be a string a list or a numpy.ndarray of string")
 
-        if self.optimizer not in ['anisotropic', 'two-pcf', 'log-likelihood', 'none']:
-            raise ValueError("Only anisotropic, two-pcf, log-likelihood and none are supported for optimizer. Current value: %s"%(self.optimizer))
+        if self.optimizer not in ['anisotropic', 'two-pcf', 'log-likelihood', 'grad-likelihood', 'none']:
+            raise ValueError("Only anisotropic, two-pcf, log-likelihood, grad-likelihood, and none are supported for optimizer. Current value: %s"%(self.optimizer))
 
         if average_fits is not None:
             import fitsio
@@ -117,9 +117,9 @@ class GPInterpolation(object):
                 kernel = self._optimizer.optimizer(kernel)
                 print('made kernel')
             # Hyperparameters estimation using maximum likelihood fit.
-            if self.optimizer == 'log-likelihood':
+            if self.optimizer in ['log-likelihood','grad-likelihood']:
                 print('before log_like')
-                self._optimizer = treegp.log_likelihood(X, y, y_err)
+                self._optimizer = treegp.log_likelihood(X, y, y_err, self.optimizer == 'grad-likelihood')
                 print('after log_like')
                 kernel = self._optimizer.optimizer(kernel)
                 print('made kernel')
@@ -159,12 +159,11 @@ class GPInterpolation(object):
         try:
             factor = (cholesky(K, overwrite_a=True, lower=False), False)
             alpha = cho_solve(factor, y, overwrite_b=False)
-        except np.linalg.LinAlgError: # Many kernels don't guarantee positive definite results
+        except np.linalg.LinAlgError: # Many kernels don't guarantee positive definite results, only positive semidefinite
             alpha = solve(K,y,assume_a = 'sym')
         y_predict = np.dot(HT,alpha.reshape((len(alpha),1))).T[0]
         if return_cov:
-            fact = cholesky(K, lower=True) # I am computing maybe twice the same things...
-            v = cho_solve((fact, True), HT.T)
+            v = cho_solve(factor, HT.T)
             y_cov = kernel.__call__(X2) - HT.dot(v)
             return y_predict, y_cov
         else:
